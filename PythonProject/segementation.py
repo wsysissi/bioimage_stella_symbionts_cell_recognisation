@@ -1,6 +1,6 @@
 from segment_anything import SamPredictor, SamAutomaticMaskGenerator, sam_model_registry
 import cv2
-from matplotlib import pyplot as plt
+#from matplotlib import pyplot as plt
 import numpy as np
 import os
 import glob
