@@ -1,0 +1,47 @@
+// Batch export: C2 (red) channel from .czi to PNG
+// Use with: Process > Batch > Macro... and tick "Read images using Bio-Formats" [2](https://www.aivia-software.com/post/imagej-fiji-quick-tip-1-convert-images-as-a-batch)[4](https://imagej.net/formats/bio-formats)
+
+setBatchMode(true);
+
+input = getDirectory("Choose INPUT folder (CZIs)");
+output = getDirectory("Choose OUTPUT folder (PNGs)");
+
+list = getFileList(input);
+
+for (i = 0; i < list.length; i++) {
+    name = list[i];
+    path = input + name;
+
+    if (File.isDirectory(path)) {
+        // Skip subfolders (simple version). If you want recursion, I can provide it.
+        continue;
+    }
+
+    if (endsWith(name, ".czi") || endsWith(name, ".CZI")) {
+
+        // Open the file (Batch Macro dialog should be set to use Bio-Formats) [2](https://www.aivia-software.com/post/imagej-fiji-quick-tip-1-convert-images-as-a-batch)
+        open(path);
+
+        title = getTitle();
+
+        // Split into channel windows named like "C1-title", "C2-title"... [3](https://fq-segmentation.readthedocs.io/en/latest/workflows-fiji-split-channels/)
+        run("Split Channels");
+
+        // Select the red channel (C2)
+        selectWindow("C2-" + title);
+
+        // OPTIONAL: If you want PNGs smaller / more compatible, uncomment 8-bit conversion
+        // run("8-bit");
+
+        // Save as PNG with _C2_red suffix
+        base = name;
+        base = replace(base, ".czi", "");
+        base = replace(base, ".CZI", "");
+        saveAs("PNG", output + base + ".png");
+
+        // Close all opened images from this file
+        run("Close All");
+    }
+}
+
+setBatchMode(false);
