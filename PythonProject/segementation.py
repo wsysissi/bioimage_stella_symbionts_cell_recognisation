@@ -14,6 +14,8 @@ def segment_images(args, image_name, destination_folder):
 
     cnt = 0
     image = cv2.imread(os.path.join(root_folder,image_name))
+    b, g, r = cv2.split(image)
+    image = cv2.merge([r, r, r])
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image_orig = image
 
@@ -44,7 +46,7 @@ def segment_images(args, image_name, destination_folder):
                 bool_mask = resize(bool_mask, (image_new.shape[0], image_new.shape[1]))
 
             # White background
-            image_new[bool_mask == False] = [255, 255, 255]
+            image_new[bool_mask == False] = [0, 0, 0]
             image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
 
             area = masks[i]['area']
@@ -113,13 +115,13 @@ def segment_images(args, image_name, destination_folder):
                 keep_mask[labeled_image == objf.label] = True
 
         image_new = image_orig.copy()
-        image_new[~keep_mask] = [255, 255, 255]
+        image_new[~keep_mask] = [0, 0, 0]
         image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
 
         save_path = f'{destination_folder}/{os.path.splitext(image_name)[0]}_revmask.png'
         cv2.imwrite(save_path, image_new)
 
-        image_new[labeled_image == False] = [255, 255, 255]
+        image_new[labeled_image == False] = [0, 0, 0]
         image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
         area_all = 0
         for j in range(len(masks)):
