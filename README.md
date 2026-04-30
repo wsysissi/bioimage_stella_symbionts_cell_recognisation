@@ -1,6 +1,6 @@
 Warwick Bioimage Hackathon.
 
-An AI classification algorithm based on CellDINO as backbone for feature extractor.
+An AI classification algorithm based on CellDINO as backbone of feature extractor.
 
 
  ## Licenses
