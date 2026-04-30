@@ -1,6 +1,5 @@
-from segment_anything import SamPredictor, SamAutomaticMaskGenerator, sam_model_registry
+from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 import cv2
-#from matplotlib import pyplot as plt
 import numpy as np
 import os
 import glob
@@ -10,177 +9,270 @@ import argparse
 import datetime
 
 
+def resize_bool_mask(mask, target_shape):
+    """
+    Resize boolean mask safely.
+    target_shape: (height, width)
+    """
+    return resize(
+        mask,
+        target_shape,
+        order=0,
+        preserve_range=True,
+        anti_aliasing=False
+    ).astype(bool)
+
+
+def crop_fixed_size_from_center(image_rgb, center_x, center_y, crop_size, pad_value=255):
+    """
+    Crop fixed-size square patch from original RGB image.
+    If crop goes outside image boundary, pad with white background.
+
+    image_rgb: H x W x 3 RGB image
+    center_x, center_y: center of crop
+    crop_size: output crop size, e.g. 128
+    pad_value: background value for padding
+    """
+
+    h, w = image_rgb.shape[:2]
+    half = crop_size // 2
+
+    x1 = int(round(center_x)) - half
+    y1 = int(round(center_y)) - half
+    x2 = x1 + crop_size
+    y2 = y1 + crop_size
+
+    # Create white canvas
+    crop = np.full(
+        (crop_size, crop_size, 3),
+        pad_value,
+        dtype=image_rgb.dtype
+    )
+
+    # Valid region in original image
+    src_x1 = max(0, x1)
+    src_y1 = max(0, y1)
+    src_x2 = min(w, x2)
+    src_y2 = min(h, y2)
+
+    # Corresponding region in crop image
+    dst_x1 = src_x1 - x1
+    dst_y1 = src_y1 - y1
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+    crop[dst_y1:dst_y2, dst_x1:dst_x2] = image_rgb[src_y1:src_y2, src_x1:src_x2]
+
+    return crop
+
+
+def get_mask_center(bool_mask, method="bbox"):
+    """
+    Get center of a mask.
+
+    method="bbox": use bounding box center
+    method="centroid": use region centroid
+    """
+
+    ys, xs = np.where(bool_mask)
+
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+
+    if method == "bbox":
+        center_x = (xs.min() + xs.max()) / 2
+        center_y = (ys.min() + ys.max()) / 2
+
+    elif method == "centroid":
+        center_x = xs.mean()
+        center_y = ys.mean()
+
+    else:
+        raise ValueError("method should be 'bbox' or 'centroid'")
+
+    return center_x, center_y
+
+
 def segment_images(args, image_name, destination_folder):
+    image_path = os.path.join(root_folder, image_name)
+    print(f"Name: {image_name}")
 
-    cnt = 0
-    image = cv2.imread(os.path.join(root_folder,image_name))
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image_orig = image
+    image_bgr = cv2.imread(image_path)
 
-    if args.isresize == True:
-        width = int(image.shape[1] * args.resize_factor)
-        height = int(image.shape[0] * args.resize_factor)
-        dim = (width, height)
-        # resize image
-        image = cv2.resize(image, dim, interpolation=cv2.INTER_NEAREST)
+    if image_bgr is None:
+        print(f"Failed to read image, skipped: {image_path}")
+        return
 
-    if not os.path.isdir(os.path.join(destination_folder)):
-        os.makedirs(os.path.join(destination_folder))
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    image_orig = image_rgb.copy()
 
-    # Check if image already processed
-    all_masks_name = f'{destination_folder}/{os.path.splitext(image_name)[0]}_*.png'
-    print(f'Name: {image_name}')
-    processed_imgs = glob.glob(all_masks_name)
-    if len(processed_imgs) > 0:
-        print('Image already processed!')
-    if len(processed_imgs) == 0:
-        # Generate the segmentation masks
-        masks = mask_generator.generate(image)
-        print(f'Masks detected: {str(len(masks))}')
-        for i in range(len(masks)):
-            image_new = image_orig.copy()
-            bool_mask = masks[i]['segmentation']
-            if args.isresize == True:
-                bool_mask = resize(bool_mask, (image_new.shape[0], image_new.shape[1]))
+    image_for_sam = image_rgb.copy()
 
-            # White background
-            image_new[bool_mask == False] = [255, 255, 255]
-            image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
+    if args.isresize:
+        width = int(image_for_sam.shape[1] * args.resize_factor)
+        height = int(image_for_sam.shape[0] * args.resize_factor)
+        image_for_sam = cv2.resize(
+            image_for_sam,
+            (width, height),
+            interpolation=cv2.INTER_NEAREST
+        )
 
-            area = masks[i]['area']
-            # Change area threshold ratio acccording to your requirements
-            area_thresh = image.shape[0] * image.shape[1] * args.area_thresh_ratio
+    os.makedirs(destination_folder, exist_ok=True)
 
-            print("area:", area)
-            print("area_thresh:", area_thresh)
-            print("corner value:", bool_mask[10, 10])
+    base_name = os.path.splitext(image_name)[0]
 
-            # Save image if area is bigger than a specified threshold
-            if area > area_thresh:
-                # We assume, that there are no spores etc. at the corners of the images.
-                # If the mask is at the corner of the images we know that the mask is the background mask and do not save it.
-                # Use coordinates [10,10] instead of [0,0], because the model sometimes has problems with the image edges and labels the first few pixel rows incorrect
-                #if bool_mask[10, 10] == False:
-                cv2.imwrite(f'{destination_folder}/{os.path.splitext(image_name)[0]}_{str(i)}.png',
-                                image_new)
-                cnt += 1
-                print(f'Number of analyzed Images: {str(cnt)}')
+    all_crops_name = os.path.join(
+        destination_folder,
+        f"{base_name}_crop_*.png"
+    )
 
-    # Sometimes the models label everything but the object of interest.
-    # So if still no mask is detected, iteration is done over the "negative" masks.
-    processed_imgs = glob.glob(all_masks_name)
-    if len(processed_imgs) == 0:
-        print('Computing reverse mask: ')
-        image_new = image_orig.copy()
-        background_mask = np.full((image_new.shape[0], image_new.shape[1]), False)
+    processed_imgs = glob.glob(all_crops_name)
 
-        for i in range(len(masks)):
-            if args.isresize == True:
-                mask = resize(masks[i]['segmentation'], (image_new.shape[0], image_new.shape[1]))
-            else:
-                mask = masks[i]['segmentation']
+    if len(processed_imgs) > 0 and not args.overwrite:
+        print("Image already processed, skipped.")
+        return
 
-            mean_val = cv2.mean(image_new, mask.astype(np.uint8))
-            mean_val = np.mean(mean_val[0:2])
+    masks = mask_generator.generate(image_for_sam)
+    print(f"Masks detected by SAM: {len(masks)}")
 
-            # We add the white (light) background to subtract it from the image later
-            if mean_val > 200:
-                background_mask = background_mask + mask
+    if len(masks) == 0:
+        print("No masks detected.")
+        return
 
-        # White background
-        if args.isresize == True:
-            background_mask = resize(background_mask, (image_new.shape[0], image_new.shape[1]))
-        object_mask = ~background_mask
+    area_thresh = image_for_sam.shape[0] * image_for_sam.shape[1] * args.area_thresh_ratio
+    print(f"Area threshold: {area_thresh}")
 
-        '''# Just keep largest mask
-        labeled_image, count = skimage.measure.label(object_mask, return_num=True)
-        object_features = skimage.measure.regionprops(labeled_image)
-        object_areas = [objf["area"] for objf in object_features]
-        for object_id, objf in enumerate(object_features, start=1):
-            if objf["area"] < max(object_areas):
-                labeled_image[labeled_image == objf["label"]] = False
-            if objf["area"] == max(object_areas):
-                labeled_image[labeled_image == objf["label"]] = True'''
+    saved_count = 0
 
-        labeled_image = skimage.measure.label(object_mask)
-        object_features = skimage.measure.regionprops(labeled_image)
+    for i, mask_info in enumerate(masks):
+        bool_mask = mask_info["segmentation"]
 
-        min_area = image.shape[0] * image.shape[1] * args.area_thresh_ratio
-        keep_mask = np.zeros_like(object_mask, dtype=bool)
+        if args.isresize:
+            bool_mask = resize_bool_mask(
+                bool_mask,
+                (image_orig.shape[0], image_orig.shape[1])
+            )
+            area = np.sum(bool_mask)
+            area_thresh_original = image_orig.shape[0] * image_orig.shape[1] * args.area_thresh_ratio
+        else:
+            bool_mask = bool_mask.astype(bool)
+            area = mask_info["area"]
+            area_thresh_original = area_thresh
 
-        for objf in object_features:
-            if objf.area >= min_area:
-                keep_mask[labeled_image == objf.label] = True
+        if area < area_thresh_original:
+            continue
 
-        image_new = image_orig.copy()
-        image_new[~keep_mask] = [255, 255, 255]
-        image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
+        center = get_mask_center(bool_mask, method=args.center_method)
 
-        save_path = f'{destination_folder}/{os.path.splitext(image_name)[0]}_revmask.png'
-        cv2.imwrite(save_path, image_new)
+        if center is None:
+            continue
 
-        image_new[labeled_image == False] = [255, 255, 255]
-        image_new = cv2.cvtColor(image_new, cv2.COLOR_RGB2BGR)
-        area_all = 0
-        for j in range(len(masks)):
-            area_all = area_all + masks[j]['area']
-        area = image.shape[0] * image.shape[1] - area_all
-        area_thresh = image.shape[0] * image.shape[1] * args.area_thresh_ratio
-        # Save image if area is bigger than a specified threshold
-        if area > area_thresh:
-            # We assume, that there are no spores etc. at the corners of the images.
-            # If the mask is at the corner of the images we know that the mask is the background mask and do not save it.
-            # Use coordinates [10,10] instead of [0,0], because the model sometimes has problems with the image edges and labels the first few pixel rows incorrect
-            #if background_mask[10, 10] == True:
-                # image_new = remove_scale(image_new)
-            cv2.imwrite(f'{destination_folder}/{os.path.splitext(image_name)[0]}_{str(i)}_revmask.png',
-                            image_new)
-            cnt += 1
-            print(f'Number of analyzed Images: {str(cnt)}')
-    # Delete loaded images to release memory and prevent loop from slowing dowm
-    del image
-    if len(processed_imgs) == 0:
-        del image_new, image_orig
+        center_x, center_y = center
+
+        crop_rgb = crop_fixed_size_from_center(
+            image_rgb=image_orig,
+            center_x=center_x,
+            center_y=center_y,
+            crop_size=args.crop_size,
+            pad_value=0
+        )
+
+        crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
+
+        save_path = os.path.join(
+            destination_folder,
+            f"{base_name}_crop_{i}.png"
+        )
+
+        ok = cv2.imwrite(save_path, crop_bgr)
+
+        if ok:
+            saved_count += 1
+            print(
+                f"Saved crop {saved_count}: {save_path}, "
+                f"area={area}, center=({center_x:.1f}, {center_y:.1f})"
+            )
+        else:
+            print(f"Failed to save: {save_path}")
+
+    print(f"Total crops saved for {image_name}: {saved_count}")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("AutoSeg")
-    parser.add_argument("--isresize", type=bool, default=False, help="Specify if images should be resized to increase speed (output has original size again)")
-    parser.add_argument("--resize_factor", type=int, default=0.5, help="Resize Factor. Height and width of images is multiplied by this factor if isresize = True")
-    parser.add_argument("--area_thresh_ratio", type=int, default=0.00005, help="Ratio that defines the minimun area a mask must have to be recognized (area_tresh_ratio = min_mask_area/total_image_area).")
+    parser = argparse.ArgumentParser("AutoSeg Fixed Size Crop")
+
+    parser.add_argument(
+        "--isresize",
+        action="store_true",
+        help="Resize image before SAM segmentation to increase speed."
+    )
+
+    parser.add_argument(
+        "--resize_factor",
+        type=float,
+        default=0.5,
+        help="Resize factor for SAM input."
+    )
+
+    parser.add_argument(
+        "--area_thresh_ratio",
+        type=float,
+        default=0.00001,
+        help="Minimum mask area ratio."
+    )
+
+    parser.add_argument(
+        "--crop_size",
+        type=int,
+        default=128,
+        help="Fixed crop size. All output crops will be crop_size x crop_size."
+    )
+
+    parser.add_argument(
+        "--center_method",
+        type=str,
+        default="bbox",
+        choices=["bbox", "centroid"],
+        help="How to define crop center. bbox is usually more stable."
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing results."
+    )
+
     args = parser.parse_args()
 
-    # Data path
-    # Select your own data path! To try the script there are some images stored under "./imgs/set_1/"
     root_folder = "/Users/u5644731/Documents/bioimage_hakathon/origin"
-    # Path to store the segmented images
-    destination_folder = "/Users/u5644731/Documents/bioimage_hakathon/segmented"
+    destination_folder = "/Users/u5644731/Documents/bioimage_hakathon/cropped"
 
-    # Model path
     ckpt_vit_b = "/Users/u5644731/Downloads/sam_vit_b_01ec64.pth"
-    #ckpt_vit_h = ("/Users/u5644731/Downloads/sam_vit_h_4b8939.pth")
 
-    # Init selected model
     sam = sam_model_registry["vit_b"](checkpoint=ckpt_vit_b)
-    predictor = SamPredictor(sam)
-    '''mask_generator = SamAutomaticMaskGenerator(sam)'''
+
     mask_generator = SamAutomaticMaskGenerator(
         model=sam,
         points_per_side=64,
         pred_iou_thresh=0.6,
         stability_score_thresh=0.6,
         crop_n_layers=1,
-        crop_n_points_downscale_factor=2,
-        min_mask_region_area=20
+        crop_n_points_downscale_factor=4,
+        min_mask_region_area=5
     )
 
-    # Iterate through folder
-    for image_name in os.listdir(root_folder):
-        #subdir in os.listdir(root_folder):
-        #subdir_path = os.path.join(root_folder, subdir)
-        #for image_name in os.listdir(subdir_path):
-        print(datetime.datetime.now())
-        print(image_name)
-        segment_images(args, image_name, destination_folder)
-        segment_images(args, image_name, destination_folder)
+    valid_exts = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
-    #segment_images(args,"CC7_20x_1_C2_red.png",destination_folder)
+    for image_name in os.listdir(root_folder):
+        if not image_name.lower().endswith(valid_exts):
+            print(f"Skip non-image file: {image_name}")
+            continue
+
+        image_path = os.path.join(root_folder, image_name)
+
+        if not os.path.isfile(image_path):
+            print(f"Skip folder: {image_path}")
+            continue
+
+        print(datetime.datetime.now())
+        segment_images(args, image_name, destination_folder)
